@@ -3,7 +3,7 @@
 > 一个基于 PyQt5 和 qfluentwidgets 的 Windows 桌面应用  
 > *“可曾听闻 碧蓝档案 阿洛娜”*
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt5](https://img.shields.io/badge/PyQt5-5.15.11-green) ![qfluentwidgets](https://img.shields.io/badge/qfluentwidgets-1.11.2-orange) ![License](https://img.shields.io/badge/License-MIT-yellow)
+![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![PyQt5](https://img.shields.io/badge/PyQt5-5.15.11-green) ![qfluentwidgets](https://img.shields.io/badge/qfluentwidgets-1.11.2-orange) ![License](https://img.shields.io/badge/License-GPLv3-blue.svg)
 
 ---
 
