@@ -1,4 +1,4 @@
-# AronaAI 设置面板 —— 完整使用指南
+# AronaAI---阿洛娜AI（并非真正的AI）
 
 > 一个基于 PyQt5 和 qfluentwidgets 的 Windows 桌面应用  
 > *“可曾听闻 碧蓝档案 阿洛娜”*
