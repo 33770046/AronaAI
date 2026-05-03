@@ -14,6 +14,28 @@ AronaAI 设置面板是一个采用 **PyQt5** 与 **qfluentwidgets** 构建的 W
 
 ---
 
+### 1. 克隆仓库
+
 ```bash
 git clone https://github.com/your-username/AronaAI.git
 cd AronaAI
+```
+
+### 2. 创建并激活虚拟环境
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. 运行项目
+
+```bash
+python main.py
+```
