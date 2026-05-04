@@ -1,5 +1,7 @@
 # AronaAI---阿洛娜AI（并非真正的AI）
 
+![](./Assets/homepage/45ce9da5-c75f-4ea3-a055-186951132875.png)
+
 > 一个基于 PyQt5 和 qfluentwidgets 的 Windows 桌面应用  
 > *“可曾听闻 碧蓝档案 阿洛娜”*
 
