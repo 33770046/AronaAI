@@ -19,7 +19,7 @@ AronaAI 设置面板是一个采用 **PyQt5** 与 **qfluentwidgets** 构建的 W
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/your-username/AronaAI.git
+git clone https://github.com/33770046/AronaAI.git
 cd AronaAI
 ```
 
