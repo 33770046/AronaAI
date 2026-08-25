@@ -493,7 +493,7 @@ class UpdateCheckCard(ExpandSettingCard):
         self._reply.finished.connect(self._onUpdateReplyFinished)
 
     def _parseVersion(self, tag):
-        match = re.search(r'([vV]|dev)[._]?(\d+\.\d+\.\d+)', tag)
+        match = re.search(r'([vV]|dev)[._]?(\d+\.\d+\.\d+(?:\.\d+)?)', tag)
         if match:
             prefix = match.group(1).lower()
             version = match.group(2)
