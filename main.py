@@ -15,6 +15,23 @@ from app.update_utils import (
 BASE = get_base_dir()
 ASSETS = get_assets_dir()
 
+_DEFAULT_AI_CONFIG = {
+    "AronaAI": {
+        "api_key": "",
+        "base_url": "",
+        "model": "",
+    }
+}
+
+
+def _ensure_config():
+    config_dir = BASE / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "config.json"
+    if not config_file.exists():
+        import json
+        config_file.write_text(json.dumps(_DEFAULT_AI_CONFIG, ensure_ascii=False, indent=4), encoding="utf-8")
+
 
 if __name__ == "__main__":
     # Cap the Spine QtWebEngine renderer's committed memory. Only a subset of
@@ -29,6 +46,7 @@ if __name__ == "__main__":
         " --disable-features=Translate,WebNfc,WebUsb,WebSerial,SharedArrayBuffer",
     )
     cleanup_leftovers()
+    _ensure_config()
     import app.config
     import app.backdrop
     qconfig.file = BASE / "config" / "config.json"

@@ -11,7 +11,7 @@ from ..update_utils import get_bundle_dir, get_assets_dir
 from qfluentwidgets.common.font import getFont
 
 
-CURRENT_VERSION = "dev.0.9.3"
+CURRENT_VERSION = "dev.0.9.3.5"
 GITHUB_REPO = "33770046/AronaAI"
 
 

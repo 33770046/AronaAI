@@ -4,7 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 from qfluentwidgets.common.config import QConfig, OptionsConfigItem, OptionsValidator, BoolValidator, ConfigSerializer, ConfigItem, ConfigValidator, Theme, qconfig
 
-from app.update_utils import list_spine_models
+from app.update_utils import list_spine_models, get_base_dir
 
 MOMOTALK = "MomoTalk"
 MOMO_TITLEBAR_COLOR = "#FA94A6"
@@ -294,7 +294,8 @@ def ensure_autostart_default():
     qconfig.set(qconfig.autostartInitialized, True)
 
 
-_AI_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.json"
+_AI_CONFIG_PATH = get_base_dir() / "config" / "config.json"
+_AI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _read_ai_config() -> dict:
