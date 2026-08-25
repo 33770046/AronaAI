@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>spine</title>
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent !important;
+    overflow: hidden;
+}
+#player {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 300px;
+    height: 400px;
+    cursor: default;
+}
+</style>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="spine://local/web/spine-player.js"></script>
+<link rel="stylesheet" href="spine://local/web/spine-player.css">
+</head>
+<body>
+<div id="player"></div>
+<script>
+(function () {
+    var dpr = window.devicePixelRatio || 1;
+    var ResizeMode = spine.webgl.ResizeMode;
+    var proto = spine.webgl.SceneRenderer.prototype;
+    proto.resize = function (resizeMode) {
+        var canvas = this.canvas;
+        var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+        var h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+        this.context.gl.viewport(0, 0, canvas.width, canvas.height);
+        if (resizeMode === ResizeMode.Expand) {
+            this.camera.setViewport(w, h);
+        } else if (resizeMode === ResizeMode.Fit) {
+            var targetWidth = this.camera.viewportWidth;
+            var targetHeight = this.camera.viewportHeight;
+            var fit = (targetHeight / targetWidth) < (h / w)
+                ? targetWidth / w : targetHeight / h;
+            this.camera.viewportWidth = w * fit;
+            this.camera.viewportHeight = h * fit;
+        }
+        this.camera.update();
+    };
+})();
+var bridge = null;
+var player = null;
+var currentModel = null;
+var animations = [];
+var currentAnimationState = null;
+var currentAssets = null;
+var blinkTimeout = null;
+var eyeControlDisabled = false;
+var isPlaying = false;
+var resetBonesFn = null;
+var moveBonesFn = null;
+var voiceLang = getParam("voice", "cn") || "cn";
+
+// Keep the player hidden until the model is loaded and its saved position is
+// applied, so switching models does not flash a spinner at the top-left corner.
+var modelReady = false;
+var layoutReady = false;
+
+document.getElementById("player").style.visibility = "hidden";
+
+// Disable the built-in loading spinner / logo overlay.
+if (spine && spine.webgl && spine.webgl.LoadingScreen && spine.webgl.LoadingScreen.prototype) {
+    spine.webgl.LoadingScreen.prototype.draw = function () {};
+}
+
+function showPlayerIfReady() {
+    if (modelReady && (layoutReady || !bridge)) {
+        document.getElementById("player").style.visibility = "visible";
+    }
+}
+
+var spineAssets = {
+    arona: {
+        skelUrl: "spine://local/arona/arona_spr.skel",
+        atlasUrl: "spine://local/arona/arona_spr.atlas",
+        premultipliedAlpha: true,
+        idleAnimationName: "Idle_01",
+        eyeCloseAnimationName: "Eye_Close_01",
+        rightEyeBone: "R_Eye_01",
+        leftEyeBone: "L_Eye_01",
+        frontHeadBone: "Head_01",
+        backHeadBone: "Head_Back",
+        eyeRotationAngle: 76.307,
+        voiceConfig: [
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_01.ogg", animation: '12', text: '您回来了？我等您很久啦！' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_02.ogg", animation: '03', text: '嗯，不错，今天也是个好天气。' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_03.ogg", animation: '02', text: '天空真是广啊……\n另一边会有些什么呢？' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_04.ogg", animation: '18', text: '偶尔也要为自己的健康着想啊，\n老师，我会很担心的。' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_05.ogg", animation: '25', text: '来，加油吧，老师！' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_06.ogg", animation: '11', text: '今天又会有什么事情在等着我呢？' }
+        ]
+    },
+    plana: {
+        skelUrl: "spine://local/plana/plana_spr.skel",
+        atlasUrl: "spine://local/plana/plana_spr.atlas",
+        premultipliedAlpha: true,
+        idleAnimationName: "Idle_01",
+        eyeCloseAnimationName: "Eye_Close_01",
+        rightEyeBone: "R_Eye_01",
+        leftEyeBone: "L_Eye_01",
+        frontHeadBone: "Head_Rot",
+        backHeadBone: "Head_Back",
+        eyeRotationAngle: 97.331,
+        voiceConfig: [
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_02.ogg", animation: '06', text: '我明白了，\n老师现在无事可做，很无聊。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_01.ogg", animation: '13', text: '混乱，该行动无法理解。\n请不要戳我，会出现故障。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_03.ogg", animation: '15', text: '确认连接。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_04.ogg", animation: '99', text: '正在待命，\n需要解决的任务还有很多。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_05.ogg", animation: '17', text: '等您很久了。' }
+        ]
+    }
+};
+
+// Fallback config for any model found in the spine folder that has no
+// hand-tuned entry above. The model follows the <name>/<name>_spr.* naming
+// convention. Eye tracking bones are probed at runtime (setupInteraction) and
+// tracking is disabled when the skeleton has no matching bones.
+//
+// Most Blue Archive atlases ship premultiplied alpha. Some (e.g. shiroko,
+// hoshino) are straight alpha. Detect the texture format at runtime so no
+// per-model override is needed. The atlas may reference a PNG with a
+// different file name, so probe the actual image the atlas points to.
+//
+// A straight-alpha texture has semi-transparent pixels whose stored RGB
+// exceeds their alpha value. Premultiplied textures store RGB already
+// multiplied by alpha, so channel values never exceed alpha. Only pixels in
+// the middle alpha band [40,180) are counted: very low alpha pixels are
+// noise after canvas decoding and near-opaque pixels rarely carry the
+// signal. The texture is classified as straight when more than half of the
+// sampled mid-alpha pixels show RGB > alpha.
+function detectPremultiplied(model, atlasText) {
+    var pngName = model + "_spr.png";
+    if (atlasText) {
+        var first = atlasText.trim().split(/\s+/)[0];
+        if (first && /\.png$/i.test(first)) pngName = first;
+    }
+    var url = "spine://local/" + model + "/" + pngName;
+    return new Promise(function (resolve) {
+        var img = new Image();
+        img.onload = function () {
+            try {
+                var canvas = document.createElement("canvas");
+                canvas.width = img.width;
+                canvas.height = img.height;
+                var ctx = canvas.getContext("2d", { willReadFrequently: true });
+                if (!ctx) { resolve(true); return; }
+                ctx.drawImage(img, 0, 0);
+                var data;
+                try {
+                    data = ctx.getImageData(0, 0, img.width, img.height).data;
+                } catch (e) {
+                    resolve(true); return;
+                }
+                var semi = 0, nonpre = 0;
+                for (var i = 3; i < data.length; i += 32) {
+                    var a = data[i];
+                    if (a >= 40 && a < 180) {
+                        semi++;
+                        if (data[i - 3] > a || data[i - 2] > a || data[i - 1] > a) {
+                            nonpre++;
+                        }
+                    }
+                }
+                resolve(semi > 0 ? nonpre / semi < 0.5 : true);
+            } catch (e) {
+                resolve(true);
+            }
+        };
+        img.onerror = function () { resolve(true); };
+        img.src = url;
+    });
+}
+
+// Read the atlas text so we can learn the PNG file name it references
+// (usually <model>_spr.png) before the spine player uploads the texture.
+// XHR is used because fetch() rejects the custom spine:// scheme.
+function loadAtlasText(model) {
+    var url = "spine://local/" + model + "/" + model + "_spr.atlas";
+    return new Promise(function (resolve) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.onload = function () {
+            resolve(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : "");
+        };
+        xhr.onerror = function () { resolve(""); };
+        xhr.send();
+    });
+}
+function makeGenericAssets(model) {
+    return {
+        skelUrl: "spine://local/" + model + "/" + model + "_spr.skel",
+        atlasUrl: "spine://local/" + model + "/" + model + "_spr.atlas",
+        premultipliedAlpha: true,         // refined by detectPremultiplied at load time
+        idleAnimationName: null,      // picked from the skeleton at runtime
+        eyeCloseAnimationName: null,  // probed at runtime; null = no blinking
+        rightEyeBone: null,
+        leftEyeBone: null,
+        frontHeadBone: null,
+        backHeadBone: null,
+        eyeRotationAngle: null,       // read from the eye bone at runtime
+        voiceConfig: []
+    };
+}
+
+function getParam(name, fallback) {
+    var value = new URLSearchParams(window.location.search).get(name);
+    return value === null ? fallback : value;
+}
+
+var AudioManager = {
+    current: null,
+
+    play: function (url) {
+        var self = this;
+        this.stop();
+        var audio = new Audio(url);
+        audio.volume = 0.5;
+        audio.preload = "auto";
+        this.current = audio;
+        return new Promise(function (resolve, reject) {
+            var done = false;
+            function finish() {
+                if (done) return;
+                done = true;
+                audio.removeEventListener("ended", finish);
+                audio.removeEventListener("error", fail);
+                if (self.current === audio) self.current = null;
+                resolve();
+            }
+            function fail() {
+                if (done) return;
+                done = true;
+                audio.removeEventListener("ended", finish);
+                audio.removeEventListener("error", fail);
+                if (self.current === audio) self.current = null;
+                reject(new Error("audio playback error"));
+            }
+            audio.addEventListener("ended", finish);
+            audio.addEventListener("error", fail);
+            var p = audio.play();
+            if (p && typeof p.catch === "function") {
+                p.catch(fail);
+            }
+        });
+    },
+
+    stop: function () {
+        if (this.current) {
+            try {
+                this.current.pause();
+                this.current.onended = null;
+                this.current.src = "";
+            } catch (e) {}
+            this.current = null;
+        }
+    },
+
+    preload: function (urls) {
+        urls.forEach(function (url) {
+            var a = new Audio(url);
+            a.volume = 0.5;
+            a.preload = "auto";
+        });
+    },
+
+    clear: function () {
+        this.stop();
+    }
+};
+
+function preloadAudio() {
+    if (!currentAssets) return;
+    var urls = currentAssets.voiceConfig.map(function (pair) { return pair.audio; });
+    AudioManager.preload(urls);
+}
+
+function loadModel(model) {
+    currentModel = model;
+    currentAssets = spineAssets[model] || makeGenericAssets(model);
+    if (spineAssets[model]) {
+        // Hand-tuned models keep their explicit premultipliedAlpha setting.
+        startPlayer();
+    } else {
+        // Generic models: probe the texture's alpha format before rendering.
+        loadAtlasText(model).then(function (atlasText) {
+            return detectPremultiplied(model, atlasText);
+        }).then(function (premult) {
+            currentAssets.premultipliedAlpha = premult;
+            startPlayer();
+        });
+    }
+
+    function startPlayer() {
+        var el = document.getElementById("player");
+        el.innerHTML = "";
+        player = new spine.SpinePlayer(el, {
+            skelUrl: currentAssets.skelUrl,
+            atlasUrl: currentAssets.atlasUrl,
+            alpha: true,
+            backgroundColor: "#00000000",
+            premultipliedAlpha: currentAssets.premultipliedAlpha,
+            showControls: false,
+            success: function (p) {
+                modelReady = true;
+                showPlayerIfReady();
+                animations = p.skeleton.data.animations.map(function (a) { return a.name; });
+                var def = (currentAssets.idleAnimationName &&
+                           animations.indexOf(currentAssets.idleAnimationName) >= 0)
+                    ? currentAssets.idleAnimationName
+                    : (animations.indexOf("Idle_01") >= 0 ? "Idle_01" : (animations[0] || "idle"));
+                p.setAnimation(def, true);
+                currentAnimationState = p.animationState;
+                probeBones(p);
+                setupInteraction(p);
+                preloadAudio();
+                if (bridge) {
+                    var vp = p.currentViewport;
+                    if (vp) {
+                        bridge.setModelSize(
+                            Math.round(vp.width + vp.padLeft + vp.padRight),
+                            Math.round(vp.height + vp.padTop + vp.padBottom)
+                        );
+                    }
+                }
+            },
+            error: function (p, msg) {
+                if (bridge) bridge.showError(String(msg));
+            }
+        });
+    }
+}
+
+// Resolve eye/head tracking bones for models without a hand-tuned config.
+// Looks up common Blue Archive bone names; when a required eye bone is
+// missing the model simply gets no cursor tracking (all nulls stay null).
+// eyeRotationAngle is read from the right eye bone when one is found.
+function probeBones(p) {
+    var assets = currentAssets;
+    if (assets.rightEyeBone && assets.leftEyeBone) return; // already configured
+
+    var boneNames = [];
+    var bones = p.skeleton.data.bones;
+    for (var i = 0; i < bones.length; i++) boneNames.push(bones[i].name);
+
+    function firstMatch(candidates) {
+        for (var j = 0; j < candidates.length; j++) {
+            if (boneNames.indexOf(candidates[j]) >= 0) return candidates[j];
+        }
+        return null;
+    }
+
+    assets.rightEyeBone = assets.rightEyeBone || firstMatch(
+        ["R_Eye_01", "R_Eye", "Eye_R", "R_Eye_1"]);
+    assets.leftEyeBone = assets.leftEyeBone || firstMatch(
+        ["L_Eye_01", "L_Eye", "Eye_L", "L_Eye_1"]);
+    assets.frontHeadBone = assets.frontHeadBone || firstMatch(
+        ["Head_Rot", "Head_01", "Head"]);
+    assets.backHeadBone = assets.backHeadBone || firstMatch(
+        ["Head_Back"]);
+    assets.eyeCloseAnimationName = assets.eyeCloseAnimationName ||
+        (animations.indexOf("Eye_Close_01") >= 0 ? "Eye_Close_01" : null);
+
+    if (!assets.rightEyeBone || !assets.leftEyeBone) {
+        // No usable eyes: disable tracking entirely.
+        assets.rightEyeBone = assets.leftEyeBone = null;
+        assets.frontHeadBone = assets.backHeadBone = null;
+    }
+}
+
+function setupInteraction(p) {
+    var skeleton = p.skeleton;
+    var animationState = p.animationState;
+    var assets = currentAssets;
+
+    if (blinkTimeout) clearTimeout(blinkTimeout);
+
+    var rightEyeBone = assets.rightEyeBone ? skeleton.findBone(assets.rightEyeBone) : null;
+    var leftEyeBone = assets.leftEyeBone ? skeleton.findBone(assets.leftEyeBone) : null;
+    var frontHeadBone = assets.frontHeadBone ? skeleton.findBone(assets.frontHeadBone) : null;
+    var backHeadBone = assets.backHeadBone ? skeleton.findBone(assets.backHeadBone) : null;
+
+    // eyeRotationAngle may be null for generic models; read it from the
+    // right eye bone's setup rotation when the bone is present.
+    if (assets.eyeRotationAngle == null) {
+        if (rightEyeBone) assets.eyeRotationAngle = rightEyeBone.data.rotation;
+        else assets.eyeRotationAngle = 0;
+    }
+
+    var rightEyeCenterX = rightEyeBone ? rightEyeBone.data.x : 0;
+    var rightEyeCenterY = rightEyeBone ? rightEyeBone.data.y : 0;
+    var leftEyeCenterX = leftEyeBone ? leftEyeBone.data.x : 0;
+    var leftEyeCenterY = leftEyeBone ? leftEyeBone.data.y : 0;
+    var frontHeadCenterX = frontHeadBone ? frontHeadBone.data.x : 0;
+    var frontHeadCenterY = frontHeadBone ? frontHeadBone.data.y : 0;
+    var backHeadCenterX = backHeadBone ? backHeadBone.data.x : 0;
+    var backHeadCenterY = backHeadBone ? backHeadBone.data.y : 0;
+
+    var maxRadius = 15;
+    var frontHeadMaxRadius = 2;
+    var backHeadMaxRadius = 1;
+
+    function rotateVector(x, y, angle) {
+        var cos = Math.cos(angle);
+        var sin = Math.sin(angle);
+        return {
+            x: x * cos - y * sin,
+            y: x * sin + y * cos
+        };
+    }
+
+    // Current applied offsets and latest desired offsets for eyes/head bones.
+    var tracking = { on: false, ex: 0, ey: 0, fx: 0, fy: 0, bx: 0, by: 0 };
+    var target = { ex: 0, ey: 0, fx: 0, fy: 0, bx: 0, by: 0 };
+
+    function computeTracking(mouseX, mouseY) {
+        var containerRect = document.getElementById("player").getBoundingClientRect();
+
+        mouseX = mouseX - (containerRect.right - containerRect.width / 2);
+        mouseY = mouseY - (containerRect.bottom - containerRect.height * 4 / 5);
+
+        var eyeRotation = assets.eyeRotationAngle * (Math.PI / 180);
+        var rotatedMouse = rotateVector(mouseX, mouseY, -eyeRotation);
+        var offsetX = rotatedMouse.x;
+        var offsetY = rotatedMouse.y;
+        var distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+
+        var angle = Math.atan2(offsetY, offsetX);
+        var maxDistance = Math.min(distance, maxRadius);
+        target.ex = -maxDistance * Math.cos(angle);
+        target.ey = maxDistance * Math.sin(angle);
+
+        var frontHeadDx = Math.min(distance, frontHeadMaxRadius) * Math.cos(angle);
+        var frontHeadDy = Math.min(distance, frontHeadMaxRadius) * Math.sin(angle);
+        var backHeadDx = Math.min(distance, backHeadMaxRadius) * Math.cos(angle);
+        var backHeadDy = Math.min(distance, backHeadMaxRadius) * Math.sin(angle);
+
+        target.fx = -frontHeadDx;
+        target.fy = frontHeadDy;
+        target.bx = backHeadDx;
+        target.by = -backHeadDy;
+    }
+
+    // The Spine render loop re-applies the animation pose to the bones on
+    // every frame (animationState.apply), which resets the eyes/head to
+    // center between cursor polls. Patch updateWorldTransform so the tracking
+    // offset is re-applied after the animation pose, every frame, regardless
+    // of how often the cursor position arrives.
+    var origUpdateWorldTransform = skeleton.updateWorldTransform;
+    skeleton.updateWorldTransform = function () {
+        if (tracking.on && !eyeControlDisabled) {
+            var k = 0.3;
+            tracking.ex += (target.ex - tracking.ex) * k;
+            tracking.ey += (target.ey - tracking.ey) * k;
+            tracking.fx += (target.fx - tracking.fx) * k;
+            tracking.fy += (target.fy - tracking.fy) * k;
+            tracking.bx += (target.bx - tracking.bx) * k;
+            tracking.by += (target.by - tracking.by) * k;
+            if (rightEyeBone) { rightEyeBone.x = rightEyeCenterX + tracking.ex; rightEyeBone.y = rightEyeCenterY + tracking.ey; }
+            if (leftEyeBone) { leftEyeBone.x = leftEyeCenterX + tracking.ex; leftEyeBone.y = leftEyeCenterY + tracking.ey; }
+            if (frontHeadBone) { frontHeadBone.x = frontHeadCenterX + tracking.fx; frontHeadBone.y = frontHeadCenterY + tracking.fy; }
+            if (backHeadBone) { backHeadBone.x = backHeadCenterX + tracking.bx; backHeadBone.y = backHeadCenterY + tracking.by; }
+        }
+        return origUpdateWorldTransform.call(this);
+    };
+
+    moveBonesFn = function (mouseX, mouseY) {
+        if (eyeControlDisabled) return;
+        computeTracking(mouseX, mouseY);
+        tracking.on = true;
+        skeleton.updateWorldTransform();
+    };
+
+    resetBonesFn = function () {
+        // Soft reset: glide back to center instead of snapping. Toggling
+        // click-through at the interactive-zone boundary makes Qt fire a
+        // spurious document mouseleave; a hard snap here is what flashes the
+        // eyes to origin for one frame.
+        tracking.on = true;
+        tracking.ex = tracking.ey = tracking.fx = tracking.fy = tracking.bx = tracking.by = 0;
+        target.ex = target.ey = target.fx = target.fy = target.bx = target.by = 0;
+        if (rightEyeBone) { rightEyeBone.x = rightEyeCenterX; rightEyeBone.y = rightEyeCenterY; }
+        if (leftEyeBone) { leftEyeBone.x = leftEyeCenterX; leftEyeBone.y = leftEyeCenterY; }
+        if (frontHeadBone) { frontHeadBone.x = frontHeadCenterX; frontHeadBone.y = frontHeadCenterY; }
+        if (backHeadBone) { backHeadBone.x = backHeadCenterX; backHeadBone.y = backHeadCenterY; }
+        skeleton.updateWorldTransform();
+    };
+
+    function playBlink() {
+        var randomTime = Math.random() * 5 + 3;
+        if (assets.eyeCloseAnimationName) {
+            var shouldDoubleBlink = Math.random() > 0.5;
+            animationState.setAnimation(1, assets.eyeCloseAnimationName, false);
+            if (shouldDoubleBlink) {
+                animationState.addAnimation(1, assets.eyeCloseAnimationName, false, 0.1);
+            }
+        }
+        blinkTimeout = setTimeout(playBlink, randomTime * 1000);
+    }
+
+    window.addEventListener("mousemove", function (event) {
+        if (moveBonesFn) moveBonesFn(event.clientX, event.clientY);
+    });
+    playBlink();
+}
+
+function applyLayout(x, y, w, h) {
+    var el = document.getElementById("player");
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.style.width = w + "px";
+    el.style.height = h + "px";
+    layoutReady = true;
+    showPlayerIfReady();
+    reportRect();
+}
+
+function movePlayer(x, y) {
+    var el = document.getElementById("player");
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    reportRect();
+}
+
+function reportRect() {
+    if (!bridge) return;
+    var el = document.getElementById("player");
+    var r = el.getBoundingClientRect();
+    bridge.setModelRect(
+        Math.round(r.left), Math.round(r.top),
+        Math.round(r.width), Math.round(r.height)
+    );
+}
+
+function positionDialog() {
+}
+
+// No document mouseleave reset: the window only covers the model now, so a
+// mouseleave fires whenever the cursor is anywhere else on screen. Resetting
+// the eyes there would fight the bridge.cursorMoved tracking which covers the
+// whole screen; without it the eyes keep following the global cursor.
+
+if (typeof QWebChannel !== "undefined") {
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+        bridge = channel.objects.bridge;
+        bridge.layoutChanged.connect(function (x, y, w, h) {
+            applyLayout(x, y, w, h);
+        });
+        bridge.moveTo.connect(function (x, y) {
+            movePlayer(x, y);
+        });
+        bridge.cursorMoved.connect(function (x, y) {
+            if (moveBonesFn) moveBonesFn(x, y);
+        });
+        loadModel(getParam("model", "arona"));
+    });
+} else {
+    loadModel(getParam("model", "arona"));
+}
+
+function isInInteractiveZone(clientX, clientY) {
+    var r = document.getElementById("player").getBoundingClientRect();
+    var zx = r.left + r.width * 0.35;
+    var zw = r.width * 0.30;
+    var zy = r.top + r.height * 0.33;
+    var zh = r.height * 0.13;
+    return clientX >= zx && clientX <= zx + zw &&
+           clientY >= zy && clientY <= zy + zh;
+}
+
+document.addEventListener("mousemove", function (e) {
+    var player = document.getElementById("player");
+    if (isInInteractiveZone(e.clientX, e.clientY)) {
+        player.style.cursor = "pointer";
+    } else {
+        player.style.cursor = "default";
+    }
+});
+
+document.addEventListener("dblclick", function (e) {
+    if (e.button === 0 && isInInteractiveZone(e.clientX, e.clientY)) {
+        if (bridge && bridge.onDoubleClick) {
+            bridge.onDoubleClick();
+        }
+    }
+});
+
+document.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+});
+</script>
+</body>
+</html>
