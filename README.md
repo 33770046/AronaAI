@@ -55,7 +55,7 @@ AronaAI/
 ├── COPYRIGHT
 │
 ├── config/                     # 运行时配置（config.json，含 AI API key）
-├── data/                       # AI 会话历史 / 记忆数据
+├── data/                       # 爬虫资源缓存
 ├── tts_cache/                  # TTS 合成缓存（wav + 参考音频特征）
 │
 ├── Assets/
