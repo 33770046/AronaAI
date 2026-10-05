@@ -1,9 +1,0 @@
---extra-index-url https://download.pytorch.org/whl/cu126
-
-PySide6>=6.5
-PySide6-Fluent-Widgets>=1.5
-pyinstaller>=6.0
-gsv-tts-lite>=0.4.7
-torch==2.14.0+cu126  # CUDA 12.6 build, required for GPU acceleration. PyPI default Windows wheels are CPU-only. Do NOT use cu130.
-torchaudio==2.11.0+cu126  # gsv_tts inference dep (TTS.py/SV), matched to the torch build above, same cu126 index
-psutil>=5.9  # used by regression test scripts (subprocess/VRAM probing)
