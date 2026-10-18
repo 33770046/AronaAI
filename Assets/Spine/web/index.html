@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>spine</title>
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent !important;
+    overflow: hidden;
+}
+#player {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 300px;
+    height: 400px;
+    cursor: default;
+}
+</style>
+<script src="bridge-shim.js"></script>
+<script src="spine://local/web/spine-player.js"></script>
+<link rel="stylesheet" href="spine://local/web/spine-player.css">
+</head>
+<body>
+<div id="player"></div>
+<script>
+(function () {
+    var dpr = window.devicePixelRatio || 1;
+    var ResizeMode = spine.webgl.ResizeMode;
+    var proto = spine.webgl.SceneRenderer.prototype;
+    proto.resize = function (resizeMode) {
+        var canvas = this.canvas;
+        var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+        var h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+        if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w;
+            canvas.height = h;
+        }
+        this.context.gl.viewport(0, 0, canvas.width, canvas.height);
+        if (resizeMode === ResizeMode.Expand) {
+            this.camera.setViewport(w, h);
+        } else if (resizeMode === ResizeMode.Fit) {
+            var targetWidth = this.camera.viewportWidth;
+            var targetHeight = this.camera.viewportHeight;
+            var fit = (targetHeight / targetWidth) < (h / w)
+                ? targetWidth / w : targetHeight / h;
+            this.camera.viewportWidth = w * fit;
+            this.camera.viewportHeight = h * fit;
+        }
+        this.camera.update();
+    };
+})();
+var bridge = null;
+var player = null;
+var currentModel = null;
+var animations = [];
+var currentAnimationState = null;
+var currentAssets = null;
+var blinkTimeout = null;
+var eyeControlDisabled = false;
+var isPlaying = false;
+var resetBonesFn = null;
+var moveBonesFn = null;
+var voiceLang = getParam("voice", "cn") || "cn";
+
+// Keep the player hidden until the model is loaded and its saved position is
+// applied, so switching models does not flash a spinner at the top-left corner.
+var modelReady = false;
+var layoutReady = false;
+
+document.getElementById("player").style.visibility = "hidden";
+
+// Disable the built-in loading spinner / logo overlay.
+if (spine && spine.webgl && spine.webgl.LoadingScreen && spine.webgl.LoadingScreen.prototype) {
+    spine.webgl.LoadingScreen.prototype.draw = function () {};
+}
+
+function showPlayerIfReady() {
+    if (modelReady && (layoutReady || !bridge)) {
+        document.getElementById("player").style.visibility = "visible";
+    }
+}
+
+var spineAssets = {
+    arona: {
+        skelUrl: "spine://local/arona/arona_spr.skel",
+        atlasUrl: "spine://local/arona/arona_spr.atlas",
+        premultipliedAlpha: true,
+        idleAnimationName: "Idle_01",
+        eyeCloseAnimationName: "Eye_Close_01",
+        rightEyeBone: "R_Eye_01",
+        leftEyeBone: "L_Eye_01",
+        frontHeadBone: "Head_01",
+        backHeadBone: "Head_Back",
+        eyeRotationAngle: 76.307,
+        voiceConfig: [
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_01.ogg", animation: '12', text: '您回来了？我等您很久啦！' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_02.ogg", animation: '03', text: '嗯，不错，今天也是个好天气。' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_03.ogg", animation: '02', text: '天空真是广啊……\n另一边会有些什么呢？' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_04.ogg", animation: '18', text: '偶尔也要为自己的健康着想啊，\n老师，我会很担心的。' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_05.ogg", animation: '25', text: '来，加油吧，老师！' },
+            { audio: "spine://local/arona/audio/" + voiceLang + "/arona_06.ogg", animation: '11', text: '今天又会有什么事情在等着我呢？' }
+        ]
+    },
+    plana: {
+        skelUrl: "spine://local/plana/plana_spr.skel",
+        atlasUrl: "spine://local/plana/plana_spr.atlas",
+        premultipliedAlpha: true,
+        idleAnimationName: "Idle_01",
+        eyeCloseAnimationName: "Eye_Close_01",
+        rightEyeBone: "R_Eye_01",
+        leftEyeBone: "L_Eye_01",
+        frontHeadBone: "Head_Rot",
+        backHeadBone: "Head_Back",
+        eyeRotationAngle: 97.331,
+        voiceConfig: [
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_02.ogg", animation: '06', text: '我明白了，\n老师现在无事可做，很无聊。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_01.ogg", animation: '13', text: '混乱，该行动无法理解。\n请不要戳我，会出现故障。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_03.ogg", animation: '15', text: '确认连接。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_04.ogg", animation: '99', text: '正在待命，\n需要解决的任务还有很多。' },
+            { audio: "spine://local/plana/audio/" + voiceLang + "/plana_05.ogg", animation: '17', text: '等您很久了。' }
+        ]
+    }
+};
+
+// Fallback config for any model found in the spine folder that has no
+// hand-tuned entry above. The model follows the <name>/<name>_spr.* naming
+// convention. Eye tracking bones are probed at runtime (setupInteraction) and
+// tracking is disabled when the skeleton has no matching bones.
+//
+// Most Blue Archive atlases ship premultiplied alpha. Some (e.g. shiroko,
+// hoshino) are straight alpha. Detect the texture format at runtime so no
+// per-model override is needed. The atlas may reference a PNG with a
+// different file name, so probe the actual image the atlas points to.
+//
+// A straight-alpha texture has semi-transparent pixels whose stored RGB
+// exceeds their alpha value. Premultiplied textures store RGB already
+// multiplied by alpha, so channel values never exceed alpha. Only pixels in
+// the middle alpha band [40,180) are counted: very low alpha pixels are
+// noise after canvas decoding and near-opaque pixels rarely carry the
+// signal. The texture is classified as straight when more than half of the
+// sampled mid-alpha pixels show RGB > alpha.
+function detectPremultiplied(model, atlasText) {
+    var pngName = model + "_spr.png";
+    if (atlasText) {
+        var first = atlasText.trim().split(/\s+/)[0];
+        if (first && /\.png$/i.test(first)) pngName = first;
+    }
+    var url = "spine://local/" + model + "/" + pngName;
+    return new Promise(function (resolve) {
+        var img = new Image();
+        img.onload = function () {
+            try {
+                var canvas = document.createElement("canvas");
+                canvas.width = img.width;
+                canvas.height = img.height;
+                var ctx = canvas.getContext("2d", { willReadFrequently: true });
+                if (!ctx) { resolve(true); return; }
+                ctx.drawImage(img, 0, 0);
+                var data;
+                try {
+                    data = ctx.getImageData(0, 0, img.width, img.height).data;
+                } catch (e) {
+                    resolve(true); return;
+                }
+                var semi = 0, nonpre = 0;
+                for (var i = 3; i < data.length; i += 32) {
+                    var a = data[i];
+                    if (a >= 40 && a < 180) {
+                        semi++;
+                        if (data[i - 3] > a || data[i - 2] > a || data[i - 1] > a) {
+                            nonpre++;
+                        }
+                    }
+                }
+                resolve(semi > 0 ? nonpre / semi < 0.5 : true);
+            } catch (e) {
+                resolve(true);
+            }
+        };
+        img.onerror = function () { resolve(true); };
+        img.src = url;
+    });
+}
+
+// Read the atlas text so we can learn the PNG file name it references
+// (usually <model>_spr.png) before the spine player uploads the texture.
+// XHR is used because fetch() rejects the custom spine:// scheme.
+function loadAtlasText(model) {
+    var url = "spine://local/" + model + "/" + model + "_spr.atlas";
+    return new Promise(function (resolve) {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", url, true);
+        xhr.onload = function () {
+            resolve(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : "");
+        };
+        xhr.onerror = function () { resolve(""); };
+        xhr.send();
+    });
+}
+function makeGenericAssets(model) {
+    return {
+        skelUrl: "spine://local/" + model + "/" + model + "_spr.skel",
+        atlasUrl: "spine://local/" + model + "/" + model + "_spr.atlas",
+        premultipliedAlpha: true,         // refined by detectPremultiplied at load time
+        idleAnimationName: null,      // picked from the skeleton at runtime
+        eyeCloseAnimationName: null,  // probed at runtime; null = no blinking
+        rightEyeBone: null,
+        leftEyeBone: null,
+        frontHeadBone: null,
+        backHeadBone: null,
+        eyeRotationAngle: null,       // read from the eye bone at runtime
+        voiceConfig: []
+    };
+}
+
+function getParam(name, fallback) {
+    var value = new URLSearchParams(window.location.search).get(name);
+    return value === null ? fallback : value;
+}
+
+var AudioManager = {
+    current: null,
+
+    play: function (url) {
+        var self = this;
+        this.stop();
+        var audio = new Audio(url);
+        audio.volume = 0.5;
+        audio.preload = "auto";
+        this.current = audio;
+        return new Promise(function (resolve, reject) {
+            var done = false;
+            function finish() {
+                if (done) return;
+                done = true;
+                audio.removeEventListener("ended", finish);
+                audio.removeEventListener("error", fail);
+                if (self.current === audio) self.current = null;
+                resolve();
+            }
+            function fail() {
+                if (done) return;
+                done = true;
+                audio.removeEventListener("ended", finish);
+                audio.removeEventListener("error", fail);
+                if (self.current === audio) self.current = null;
+                reject(new Error("audio playback error"));
+            }
+            audio.addEventListener("ended", finish);
+            audio.addEventListener("error", fail);
+            var p = audio.play();
+            if (p && typeof p.catch === "function") {
+                p.catch(fail);
+            }
+        });
+    },
+
+    stop: function () {
+        if (this.current) {
+            try {
+                this.current.pause();
+                this.current.onended = null;
+                this.current.src = "";
+            } catch (e) {}
+            this.current = null;
+        }
+    },
+
+    preload: function (urls) {
+        urls.forEach(function (url) {
+            var a = new Audio(url);
+            a.volume = 0.5;
+            a.preload = "auto";
+        });
+    },
+
+    clear: function () {
+        this.stop();
+    }
+};
+
+function preloadAudio() {
+    if (!currentAssets) return;
+    var urls = currentAssets.voiceConfig.map(function (pair) { return pair.audio; });
+    AudioManager.preload(urls);
+}
+
+function loadModel(model) {
+    currentModel = model;
+    currentAssets = spineAssets[model] || makeGenericAssets(model);
+    if (spineAssets[model]) {
+        // Hand-tuned models keep their explicit premultipliedAlpha setting.
+        startPlayer();
+    } else {
+        // Generic models: probe the texture's alpha format before rendering.
+        loadAtlasText(model).then(function (atlasText) {
+            return detectPremultiplied(model, atlasText);
+        }).then(function (premult) {
+            currentAssets.premultipliedAlpha = premult;
+            startPlayer();
+        });
+    }
+
+    function startPlayer() {
+        var el = document.getElementById("player");
+        el.innerHTML = "";
+        player = new spine.SpinePlayer(el, {
+            skelUrl: currentAssets.skelUrl,
+            atlasUrl: currentAssets.atlasUrl,
+            alpha: true,
+            backgroundColor: "#00000000",
+            premultipliedAlpha: currentAssets.premultipliedAlpha,
+            showControls: false,
+            success: function (p) {
+                modelReady = true;
+                showPlayerIfReady();
+                animations = p.skeleton.data.animations.map(function (a) { return a.name; });
+                var def = (currentAssets.idleAnimationName &&
+                           animations.indexOf(currentAssets.idleAnimationName) >= 0)
+                    ? currentAssets.idleAnimationName
+                    : (animations.indexOf("Idle_01") >= 0 ? "Idle_01" : (animations[0] || "idle"));
+                p.setAnimation(def, true);
+                currentAnimationState = p.animationState;
+                probeBones(p);
+                setupInteraction(p);
+                preloadAudio();
+                if (bridge) {
+                    var vp = p.currentViewport;
+                    if (vp) {
+                        bridge.setModelSize(
+                            Math.round(vp.width + vp.padLeft + vp.padRight),
+                            Math.round(vp.height + vp.padTop + vp.padBottom)
+                        );
+                    }
+                }
+            },
+            error: function (p, msg) {
+                if (bridge) bridge.showError(String(msg));
+            }
+        });
+    }
+}
+
+// Resolve eye/head tracking bones for models without a hand-tuned config.
+// Looks up common Blue Archive bone names; when a required eye bone is
+// missing the model simply gets no cursor tracking (all nulls stay null).
+// eyeRotationAngle is read from the right eye bone when one is found.
+function probeBones(p) {
+    var assets = currentAssets;
+    if (assets.rightEyeBone && assets.leftEyeBone) return; // already configured
+
+    var boneNames = [];
+    var bones = p.skeleton.data.bones;
+    for (var i = 0; i < bones.length; i++) boneNames.push(bones[i].name);
+
+    function firstMatch(candidates) {
+        for (var j = 0; j < candidates.length; j++) {
+            if (boneNames.indexOf(candidates[j]) >= 0) return candidates[j];
+        }
+        return null;
+    }
+
+    assets.rightEyeBone = assets.rightEyeBone || firstMatch(
+        ["R_Eye_01", "R_Eye", "Eye_R", "R_Eye_1"]);
+    assets.leftEyeBone = assets.leftEyeBone || firstMatch(
+        ["L_Eye_01", "L_Eye", "Eye_L", "L_Eye_1"]);
+    assets.frontHeadBone = assets.frontHeadBone || firstMatch(
+        ["Head_Rot", "Head_01", "Head"]);
+    assets.backHeadBone = assets.backHeadBone || firstMatch(
+        ["Head_Back"]);
+    assets.eyeCloseAnimationName = assets.eyeCloseAnimationName ||
+        (animations.indexOf("Eye_Close_01") >= 0 ? "Eye_Close_01" : null);
+
+    if (!assets.rightEyeBone || !assets.leftEyeBone) {
+        // No usable eyes: disable tracking entirely.
+        assets.rightEyeBone = assets.leftEyeBone = null;
+        assets.frontHeadBone = assets.backHeadBone = null;
+    }
+}
+
+function setupInteraction(p) {
+    var skeleton = p.skeleton;
+    var animationState = p.animationState;
+    var assets = currentAssets;
+
+    if (blinkTimeout) clearTimeout(blinkTimeout);
+
+    var rightEyeBone = assets.rightEyeBone ? skeleton.findBone(assets.rightEyeBone) : null;
+    var leftEyeBone = assets.leftEyeBone ? skeleton.findBone(assets.leftEyeBone) : null;
+    var frontHeadBone = assets.frontHeadBone ? skeleton.findBone(assets.frontHeadBone) : null;
+    var backHeadBone = assets.backHeadBone ? skeleton.findBone(assets.backHeadBone) : null;
+
+    // eyeRotationAngle may be null for generic models; read it from the
+    // right eye bone's setup rotation when the bone is present.
+    if (assets.eyeRotationAngle == null) {
+        if (rightEyeBone) assets.eyeRotationAngle = rightEyeBone.data.rotation;
+        else assets.eyeRotationAngle = 0;
+    }
+
+    var rightEyeCenterX = rightEyeBone ? rightEyeBone.data.x : 0;
+    var rightEyeCenterY = rightEyeBone ? rightEyeBone.data.y : 0;
+    var leftEyeCenterX = leftEyeBone ? leftEyeBone.data.x : 0;
+    var leftEyeCenterY = leftEyeBone ? leftEyeBone.data.y : 0;
+    var frontHeadCenterX = frontHeadBone ? frontHeadBone.data.x : 0;
+    var frontHeadCenterY = frontHeadBone ? frontHeadBone.data.y : 0;
+    var backHeadCenterX = backHeadBone ? backHeadBone.data.x : 0;
+    var backHeadCenterY = backHeadBone ? backHeadBone.data.y : 0;
+
+    var maxRadius = 15;
+    var frontHeadMaxRadius = 2;
+    var backHeadMaxRadius = 1;
+
+    function rotateVector(x, y, angle) {
+        var cos = Math.cos(angle);
+        var sin = Math.sin(angle);
+        return {
+            x: x * cos - y * sin,
+            y: x * sin + y * cos
+        };
+    }
+
+    // Current applied offsets and latest desired offsets for eyes/head bones.
+    var tracking = { on: false, ex: 0, ey: 0, fx: 0, fy: 0, bx: 0, by: 0 };
+    var target = { ex: 0, ey: 0, fx: 0, fy: 0, bx: 0, by: 0 };
+
+    function computeTracking(mouseX, mouseY) {
+        var containerRect = document.getElementById("player").getBoundingClientRect();
+
+        mouseX = mouseX - (containerRect.right - containerRect.width / 2);
+        mouseY = mouseY - (containerRect.bottom - containerRect.height * 4 / 5);
+
+        var eyeRotation = assets.eyeRotationAngle * (Math.PI / 180);
+        var rotatedMouse = rotateVector(mouseX, mouseY, -eyeRotation);
+        var offsetX = rotatedMouse.x;
+        var offsetY = rotatedMouse.y;
+        var distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+
+        var angle = Math.atan2(offsetY, offsetX);
+        var maxDistance = Math.min(distance, maxRadius);
+        target.ex = -maxDistance * Math.cos(angle);
+        target.ey = maxDistance * Math.sin(angle);
+
+        var frontHeadDx = Math.min(distance, frontHeadMaxRadius) * Math.cos(angle);
+        var frontHeadDy = Math.min(distance, frontHeadMaxRadius) * Math.sin(angle);
+        var backHeadDx = Math.min(distance, backHeadMaxRadius) * Math.cos(angle);
+        var backHeadDy = Math.min(distance, backHeadMaxRadius) * Math.sin(angle);
+
+        target.fx = -frontHeadDx;
+        target.fy = frontHeadDy;
+        target.bx = backHeadDx;
+        target.by = -backHeadDy;
+    }
+
+    // The Spine render loop re-applies the animation pose to the bones on
+    // every frame (animationState.apply), which resets the eyes/head to
+    // center between cursor polls. Patch updateWorldTransform so the tracking
+    // offset is re-applied after the animation pose, every frame, regardless
+    // of how often the cursor position arrives.
+    var origUpdateWorldTransform = skeleton.updateWorldTransform;
+    skeleton.updateWorldTransform = function () {
+        // While a pat is running the Pat animation owns the face; cursor
+        // eye writes would stomp it every frame.
+        var patGated = pat.state !== "off" || patTracksBusy();
+        if (tracking.on && !eyeControlDisabled && !patGated) {
+            var k = 0.3;
+            tracking.ex += (target.ex - tracking.ex) * k;
+            tracking.ey += (target.ey - tracking.ey) * k;
+            tracking.fx += (target.fx - tracking.fx) * k;
+            tracking.fy += (target.fy - tracking.fy) * k;
+            tracking.bx += (target.bx - tracking.bx) * k;
+            tracking.by += (target.by - tracking.by) * k;
+            if (rightEyeBone) { rightEyeBone.x = rightEyeCenterX + tracking.ex; rightEyeBone.y = rightEyeCenterY + tracking.ey; }
+            if (leftEyeBone) { leftEyeBone.x = leftEyeCenterX + tracking.ex; leftEyeBone.y = leftEyeCenterY + tracking.ey; }
+            if (frontHeadBone) { frontHeadBone.x = frontHeadCenterX + tracking.fx; frontHeadBone.y = frontHeadCenterY + tracking.fy; }
+            if (backHeadBone) { backHeadBone.x = backHeadCenterX + tracking.bx; backHeadBone.y = backHeadCenterY + tracking.by; }
+        }
+        var r = origUpdateWorldTransform.call(this);
+        if ((pat.state === "active" || pat.state === "ending") &&
+            pat.bones && pat.bones.tp) {
+            try {
+                // First pass above gave a world transform with no leftover
+                // tilt from the previous frame; follow is computed from it,
+                // then the tilt is applied and the world transform redone.
+                stepPatFollow();
+                var headBone = pat.bones.head;
+                var savedRot = 0;
+                if (headBone) {
+                    savedRot = headBone.rotation;
+                    headBone.rotation = savedRot + pat.followT * PAT_TILT_DEG;
+                }
+                applyPatFollow();
+                pat.followApplied = true;
+                origUpdateWorldTransform.call(this);
+                if (headBone) headBone.rotation = savedRot;
+            } catch (err) {
+                if (!pat.errLogged) {
+                    pat.errLogged = true;
+                    if (window.console) console.error("pat follow: " + err);
+                }
+                try {
+                    var stx = pat.animState;
+                    if (stx) {
+                        stx.addEmptyAnimation(PAT_TRACK_A, PAT_END_MIX_OUT, 0);
+                        stx.addEmptyAnimation(PAT_TRACK_M, PAT_END_MIX_OUT, 0);
+                    }
+                } catch (e2) {}
+                pat.anims = false;
+                patGoOff();
+            }
+        }
+        return r;
+    };
+
+    // Bind the head-pat interaction to this skeleton; pat.onActivate hands
+    // the face to the frozen Pat pose by centering the tracked bones once.
+    pat.animState = animationState;
+    pat.bones = {
+        tp: skeleton.findBone("Touch_Point") ||
+            skeleton.findBone("Head") || skeleton.findBone("Head_set"),
+        key: skeleton.findBone("Touch_Point_Key"),
+        head: skeleton.findBone("Head") || skeleton.findBone("Head_set")
+    };
+    pat.anims = animations.indexOf("Pat_01_A") >= 0 &&
+                animations.indexOf("Pat_01_M") >= 0;
+    patReset();
+    if (drag.state !== "off") dragEnd();
+    pat.onActivate = function () {
+        tracking.ex = tracking.ey = tracking.fx = tracking.fy =
+        tracking.bx = tracking.by = 0;
+        target.ex = target.ey = target.fx = target.fy = target.bx = target.by = 0;
+        if (rightEyeBone) { rightEyeBone.x = rightEyeCenterX; rightEyeBone.y = rightEyeCenterY; }
+        if (leftEyeBone) { leftEyeBone.x = leftEyeCenterX; leftEyeBone.y = leftEyeCenterY; }
+        if (frontHeadBone) { frontHeadBone.x = frontHeadCenterX; frontHeadBone.y = frontHeadCenterY; }
+        if (backHeadBone) { backHeadBone.x = backHeadCenterX; backHeadBone.y = backHeadCenterY; }
+    };
+    reportPatZone(true);
+    reportChatZone(true);
+
+    moveBonesFn = function (mouseX, mouseY) {
+        if (eyeControlDisabled) return;
+        computeTracking(mouseX, mouseY);
+        tracking.on = true;
+        skeleton.updateWorldTransform();
+    };
+
+    resetBonesFn = function () {
+        // Soft reset: glide back to center instead of snapping. Toggling
+        // click-through at the interactive-zone boundary makes Qt fire a
+        // spurious document mouseleave; a hard snap here is what flashes the
+        // eyes to origin for one frame.
+        tracking.on = true;
+        tracking.ex = tracking.ey = tracking.fx = tracking.fy = tracking.bx = tracking.by = 0;
+        target.ex = target.ey = target.fx = target.fy = target.bx = target.by = 0;
+        if (rightEyeBone) { rightEyeBone.x = rightEyeCenterX; rightEyeBone.y = rightEyeCenterY; }
+        if (leftEyeBone) { leftEyeBone.x = leftEyeCenterX; leftEyeBone.y = leftEyeCenterY; }
+        if (frontHeadBone) { frontHeadBone.x = frontHeadCenterX; frontHeadBone.y = frontHeadCenterY; }
+        if (backHeadBone) { backHeadBone.x = backHeadCenterX; backHeadBone.y = backHeadCenterY; }
+        skeleton.updateWorldTransform();
+    };
+
+    function playBlink() {
+        var randomTime = Math.random() * 5 + 3;
+        if (assets.eyeCloseAnimationName) {
+            var shouldDoubleBlink = Math.random() > 0.5;
+            animationState.setAnimation(1, assets.eyeCloseAnimationName, false);
+            if (shouldDoubleBlink) {
+                animationState.addAnimation(1, assets.eyeCloseAnimationName, false, 0.1);
+            }
+        }
+        blinkTimeout = setTimeout(playBlink, randomTime * 1000);
+    }
+
+    window.addEventListener("mousemove", function (event) {
+        if (moveBonesFn) moveBonesFn(event.clientX, event.clientY);
+    });
+    playBlink();
+}
+
+// ---- Head pat (touch) ---------------------------------------------------
+// Hold the pointer on the Touch_Point ellipse: freeze Pat_01_A on track 3
+// and Pat_01_M on track 4 as a layered hold pose; on release play
+// PatEnd_01_A/_M and fade both tracks back to the idle pose underneath.
+// The head follows the cursor horizontally while held. Ported from
+// AronaArchive's QtSpineManager so parameters match the reference.
+var PAT_TRACK_A = 3;
+var PAT_TRACK_M = 4;
+var PAT_HOLD_MS = 180;        // press must last this long before the pose starts
+var PAT_HIT_RX = 140;         // world-unit ellipse around Touch_Point
+var PAT_HIT_RY = 100;
+var PAT_FOLLOW_RANGE = 160;   // world units of cursor travel for t = -1..1
+var PAT_FOLLOW_RADIUS = 40;   // world units Touch_Point_Key slides
+var PAT_TILT_DEG = 1.0;
+var PAT_FOLLOW_SPEED = 12;    // t units per second
+var PAT_END_MS = 67;          // follow decay window on release
+var PAT_END_MIX_IN = 0.02;
+var PAT_END_MIX_OUT = 0.08;
+var PAT_ZONE_PAD = 16;        // px of click-through slack around the ellipse
+
+var pat = {
+    state: "off",             // off | arming | active | ending
+    animState: null,
+    bones: null,              // {tp, key, head}
+    anims: false,
+    timer: null,
+    pointerId: null,
+    followApplied: false,
+    lastMouse: {x: 0, y: 0},
+    followT: 0,
+    followGeom: null,          // hit ellipse captured at activation;
+                               // patGeom() is unreliable inside the render
+                               // callback, so the hold uses this snapshot
+    endFromT: 0,
+    endAt: 0,
+    lastStepAt: 0,
+    lastBox: null,
+    lastBoxSent: 0,
+    onActivate: null
+};
+
+// Project Touch_Point to viewport CSS coords and derive the reference's
+// 140x100 world-unit hit ellipse in screen px (orthographic scale is
+// uniform, so a +100 world-unit probe pair gives px per unit).
+function patGeom() {
+    try {
+        if (!pat.bones || !pat.bones.tp || !player ||
+            !player.canvas || !player.sceneRenderer) return null;
+        var m = player.sceneRenderer.camera.projectionView.values;
+        var tp = pat.bones.tp;
+        var cb = player.canvas.getBoundingClientRect();
+        if (!cb.width || !cb.height) return null;
+        function proj(wx, wy) {
+            var cw = m[3] * wx + m[7] * wy + m[15];
+            if (!cw) return null;
+            var nx = (m[0] * wx + m[4] * wy + m[12]) / cw;
+            var ny = (m[1] * wx + m[5] * wy + m[13]) / cw;
+            return {x: cb.left + (nx * 0.5 + 0.5) * cb.width,
+                    y: cb.top + (1 - (ny * 0.5 + 0.5)) * cb.height};
+        }
+        var c = proj(tp.worldX, tp.worldY);
+        var c2 = proj(tp.worldX + 100, tp.worldY);
+        var c3 = proj(tp.worldX, tp.worldY + 100);
+        if (!c || !c2 || !c3) return null;
+        var ppuX = Math.abs(c2.x - c.x) / 100;
+        var ppuY = Math.abs(c3.y - c.y) / 100;
+        if (!(ppuX > 1e-4) || !(ppuY > 1e-4)) return null;
+        return {cx: c.x, cy: c.y, rx: PAT_HIT_RX * ppuX, ry: PAT_HIT_RY * ppuY,
+                ppuX: ppuX};
+    } catch (e) {
+        return null;
+    }
+}
+
+function patHitTest(clientX, clientY) {
+    var g = patGeom();
+    if (!g) return false;
+    var nx = (clientX - g.cx) / g.rx;
+    var ny = (clientY - g.cy) / g.ry;
+    return nx * nx + ny * ny <= 1;
+}
+
+// Tell Python the click-through exemption box around the pat ellipse.
+// Throttled; sends only when the box actually moved.
+function reportPatZone(force) {
+    if (!bridge || typeof bridge.patZone !== "function") return;
+    var now = Date.now();
+    if (!force && now - pat.lastBoxSent < 200) return;
+    var g = patGeom();
+    var b;
+    if (g) {
+        b = {x: Math.round(g.cx - g.rx - PAT_ZONE_PAD),
+             y: Math.round(g.cy - g.ry - PAT_ZONE_PAD),
+             w: Math.round((g.rx + PAT_ZONE_PAD) * 2),
+             h: Math.round((g.ry + PAT_ZONE_PAD) * 2)};
+    } else {
+        b = {x: 0, y: 0, w: 0, h: 0};
+    }
+    var last = pat.lastBox;
+    if (last && !force && Math.abs(last.x - b.x) < 3 &&
+        Math.abs(last.y - b.y) < 3 && Math.abs(last.w - b.w) < 3 &&
+        Math.abs(last.h - b.h) < 3) return;
+    pat.lastBox = b;
+    pat.lastBoxSent = now;
+    bridge.patZone(b.x, b.y, b.w, b.h);
+}
+setInterval(function () { reportPatZone(false); reportChatZone(false); }, 250);
+
+function patNotify(active) {
+    if (bridge && typeof bridge.patState === "function") {
+        bridge.patState(active ? 1 : 0);
+    }
+}
+
+function patGoOff() {
+    if (pat.timer) { clearTimeout(pat.timer); pat.timer = null; }
+    var was = pat.state;
+    pat.state = "off";
+    pat.followT = 0;
+    pat.followGeom = null;
+    pat.lastStepAt = 0;
+    if (pat.pointerId !== null) {
+        try { document.body.releasePointerCapture(pat.pointerId); } catch (e) {}
+        pat.pointerId = null;
+    }
+    if (pat.followApplied && pat.bones && pat.bones.tp && pat.bones.key) {
+        try { applyPatFollow(); } catch (e2) {}
+    }
+    pat.followApplied = false;
+    if (was !== "off") patNotify(false);
+}
+
+function patArm(e) {
+    pat.state = "arming";
+    pat.lastMouse.x = e.clientX;
+    pat.lastMouse.y = e.clientY;
+    pat.pointerId = (e.pointerId === undefined) ? null : e.pointerId;
+    patNotify(true);
+    pat.timer = setTimeout(patActivate, PAT_HOLD_MS);
+}
+
+function patActivate() {
+    pat.timer = null;
+    if (pat.state !== "arming") return;
+    var st = pat.animState;
+    if (!st || !pat.bones || !pat.bones.tp) { patGoOff(); return; }
+    pat.state = "active";
+    pat.followT = 0;
+    pat.followGeom = patGeom();
+    pat.lastStepAt = 0;
+    patHold(st, PAT_TRACK_A, "Pat_01_A");
+    patHold(st, PAT_TRACK_M, "Pat_01_M");
+    if (pat.onActivate) pat.onActivate();
+    if (pat.pointerId !== null && document.body.setPointerCapture) {
+        try { document.body.setPointerCapture(pat.pointerId); } catch (e) {}
+    }
+}
+
+function patHold(st, track, name) {
+    var anim = player && player.skeleton
+        ? player.skeleton.data.findAnimation(name) : null;
+    if (!anim) return;
+    var entry = st.setAnimation(track, name, anim.duration > 0);
+    if (!entry) return;
+    entry.timeScale = 0;      // freeze: pose holds at frame 0 while held
+    entry.trackEnd = 1e9;
+}
+
+function patEnd() {
+    if (pat.state !== "active") return;
+    var st = pat.animState;
+    pat.state = "ending";
+    pat.endFromT = pat.followT;
+    pat.endAt = performance.now();
+    if (!st) { patGoOff(); return; }
+    patPlayEnd(st, PAT_TRACK_A, "PatEnd_01_A");
+    patPlayEnd(st, PAT_TRACK_M, "PatEnd_01_M");
+}
+
+function patPlayEnd(st, track, name) {
+    var anim = player && player.skeleton
+        ? player.skeleton.data.findAnimation(name) : null;
+    if (!anim) {
+        st.addEmptyAnimation(track, PAT_END_MIX_OUT, 0);
+        return;
+    }
+    var entry = st.setAnimation(track, name, false);
+    if (!entry) return;
+    entry.mixDuration = PAT_END_MIX_IN;
+    var dur = anim.duration > 0 ? anim.duration : PAT_END_MS;
+    st.addEmptyAnimation(track, PAT_END_MIX_OUT, dur);
+}
+
+// Eye/head cursor tracking stays frozen until both pat tracks fully end,
+// so the Pat expression is not stomped by eye-bone writes.
+function patTracksBusy() {
+    var st = pat.animState;
+    if (!st) return false;
+    return !!(st.getCurrent(PAT_TRACK_A) || st.getCurrent(PAT_TRACK_M));
+}
+
+function patTargetT() {
+    if (!pat.bones || !pat.bones.tp) return 0;
+    // Frame callbacks cannot rely on patGeom(), so use the snapshot taken
+    // when the hold activated (retry once if activation saw no geometry).
+    var g = pat.followGeom;
+    if (!g) { g = patGeom(); pat.followGeom = g; }
+    if (!g) return 0;
+    var t = (pat.lastMouse.x - g.cx) / (PAT_FOLLOW_RANGE * g.ppuX);
+    if (t < -1) t = -1;
+    if (t > 1) t = 1;
+    return t;
+}
+
+// Speed-limited follow while held; smoothstep decay after release.
+function stepPatFollow() {
+    var now = performance.now();
+    var dt = pat.lastStepAt ? (now - pat.lastStepAt) / 1000 : 0.016;
+    if (dt > 0.1) dt = 0.1;
+    pat.lastStepAt = now;
+    if (pat.state === "ending") {
+        var u = (now - pat.endAt) / PAT_END_MS;
+        if (u < 0) u = 0;
+        if (u > 1) u = 1;
+        var s = u * u * (3 - 2 * u);
+        pat.followT = pat.endFromT * (1 - s);
+        if (u >= 1) patGoOff();
+        return;
+    }
+    if (pat.state !== "active") return;
+    var maxDelta = PAT_FOLLOW_SPEED * dt;
+    var delta = patTargetT() - pat.followT;
+    if (delta > maxDelta) delta = maxDelta;
+    else if (delta < -maxDelta) delta = -maxDelta;
+    pat.followT += delta;
+}
+
+// Touch_Point_Key follows in Touch_Point's frame (Key's parent is
+// Touch_Point); world Y stays pinned so the head is not dragged vertically.
+function applyPatFollow() {
+    var bones = pat.bones;
+    if (!bones || !bones.tp || !bones.key) return;
+    var tp = bones.tp;
+    var local = tp.worldToLocal({
+        x: tp.worldX + pat.followT * PAT_FOLLOW_RADIUS,
+        y: tp.worldY
+    });
+    bones.key.x = local.x;
+    bones.key.y = local.y;
+}
+
+function patReset() {
+    if (pat.timer) { clearTimeout(pat.timer); pat.timer = null; }
+    var was = pat.state;
+    pat.state = "off";
+    pat.followT = 0;
+    pat.followGeom = null;
+    pat.endFromT = 0;
+    pat.lastStepAt = 0;
+    pat.pointerId = null;
+    pat.followApplied = false;
+    pat.lastBox = null;
+    if (was !== "off") patNotify(false);
+}
+
+// Python watchdog calls this when the left button is observed up while the
+// page may have missed the release (e.g. released outside the window).
+window.__patForceEnd = function () {
+    if (pat.state === "arming") patGoOff();
+    else if (pat.state === "active") patEnd();
+};
+
+document.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0 || e.isPrimary === false) return;
+    if (pat.state === "arming" || pat.state === "active") return;
+    if (!pat.anims || !pat.bones || !pat.bones.tp) return;
+    if (!patHitTest(e.clientX, e.clientY)) return;
+    patArm(e);
+});
+document.addEventListener("pointerup", function (e) {
+    if (e.button !== 0) return;
+    if (pat.state === "arming") patGoOff();
+    else if (pat.state === "active") patEnd();
+});
+document.addEventListener("pointercancel", function () {
+    if (pat.state === "arming") patGoOff();
+    else if (pat.state === "active") patEnd();
+});
+document.addEventListener("mousemove", function (e) {
+    pat.lastMouse.x = e.clientX;
+    pat.lastMouse.y = e.clientY;
+});
+window.addEventListener("blur", function () {
+    if (window.__patForceEnd) window.__patForceEnd();
+    if (window.__forceDragEnd) window.__forceDragEnd();
+});
+
+// ---- Middle-drag (move the character) -------------------------------
+// Same shape as the head-pat flow: the page owns the state machine
+// (400ms long-press inside the chat zone, pointer capture, release),
+// Python runs the window follow loop and force-ends a hold it believes
+// was released elsewhere (window.__forceDragEnd is the middle-button
+// twin of __patForceEnd).
+var DRAG_LONG_PRESS_MS = 400;
+var drag = {
+    state: "off",              // off | arming | active
+    timer: null,
+    pointerId: null
+};
+
+function dragNotify(level) {
+    if (bridge && typeof bridge.dragState === "function") {
+        bridge.dragState(level);
+    }
+}
+
+function dragEnd() {
+    if (drag.timer) { clearTimeout(drag.timer); drag.timer = null; }
+    var was = drag.state;
+    drag.state = "off";
+    if (drag.pointerId !== null) {
+        try { document.body.releasePointerCapture(drag.pointerId); } catch (e) {}
+        drag.pointerId = null;
+    }
+    if (was !== "off") dragNotify(0);
+}
+
+function dragArm(e) {
+    drag.state = "arming";
+    drag.pointerId = (e.pointerId === undefined) ? null : e.pointerId;
+    dragNotify(1);
+    drag.timer = setTimeout(dragActivate, DRAG_LONG_PRESS_MS);
+}
+
+function dragActivate() {
+    drag.timer = null;
+    if (drag.state !== "arming") return;
+    drag.state = "active";
+    dragNotify(2);
+    if (drag.pointerId !== null && document.body.setPointerCapture) {
+        try { document.body.setPointerCapture(drag.pointerId); } catch (e) {}
+    }
+}
+
+// Python watchdog entry point (mirrors __patForceEnd).
+window.__forceDragEnd = function () {
+    dragEnd();
+};
+
+document.addEventListener("pointerdown", function (e) {
+    if (e.button !== 1) return;
+    if (drag.state !== "off") return;
+    if (!isInInteractiveZone(e.clientX, e.clientY)) return;
+    e.preventDefault();
+    dragArm(e);
+});
+document.addEventListener("pointerup", function (e) {
+    if (e.button !== 1) return;
+    if (drag.state !== "off") dragEnd();
+});
+document.addEventListener("pointercancel", function () {
+    if (drag.state !== "off") dragEnd();
+});
+// Middle-click default action in Chromium is autoscroll; never wanted
+// over the pet (same spirit as the contextmenu suppression).
+document.addEventListener("mousedown", function (e) {
+    if (e.button === 1) e.preventDefault();
+});
+
+function applyLayout(x, y, w, h) {
+    var el = document.getElementById("player");
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.style.width = w + "px";
+    el.style.height = h + "px";
+    layoutReady = true;
+    showPlayerIfReady();
+    reportRect();
+}
+
+function movePlayer(x, y) {
+    var el = document.getElementById("player");
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    reportRect();
+}
+
+function reportRect() {
+    if (!bridge) return;
+    var el = document.getElementById("player");
+    var r = el.getBoundingClientRect();
+    bridge.setModelRect(
+        Math.round(r.left), Math.round(r.top),
+        Math.round(r.width), Math.round(r.height)
+    );
+    reportChatZone(false);
+}
+
+function positionDialog() {
+}
+
+// No document mouseleave reset: the window only covers the model now, so a
+// mouseleave fires whenever the cursor is anywhere else on screen. Resetting
+// the eyes there would fight the bridge.cursorMoved tracking which covers the
+// whole screen; without it the eyes keep following the global cursor.
+
+if (typeof QWebChannel !== "undefined") {
+    new QWebChannel(qt.webChannelTransport, function (channel) {
+        bridge = channel.objects.bridge;
+        bridge.layoutChanged.connect(function (x, y, w, h) {
+            applyLayout(x, y, w, h);
+        });
+        bridge.moveTo.connect(function (x, y) {
+            movePlayer(x, y);
+        });
+        bridge.cursorMoved.connect(function (x, y) {
+            // Global cursor poll (covers the whole screen) doubles as the
+            // pat follow input, even while the page misses local mousemove.
+            pat.lastMouse.x = x;
+            pat.lastMouse.y = y;
+            if (moveBonesFn) moveBonesFn(x, y);
+        });
+        loadModel(getParam("model", "arona"));
+    });
+} else {
+    loadModel(getParam("model", "arona"));
+}
+
+// Chat-zone rect in viewport CSS px: hit-test source for the dblclick
+// dialog and the middle-drag hold, plus the click-through exemption box
+// Python receives via chatZone (mirrors patZone). Deliberately separate
+// from the pat Touch_Point ellipse so the two interactions keep their own
+// spots (pat on the head, chat/drag on the upper body). The pointer stays
+// the system default everywhere - the zone is invisible, a link cursor
+// over it would look arbitrary.
+function chatZoneBox() {
+    var el = document.getElementById("player");
+    if (!el) return null;
+    var r = el.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    return {
+        x: r.left + r.width * 0.35,
+        y: r.top + r.height * 0.33,
+        w: r.width * 0.30,
+        h: r.height * 0.13
+    };
+}
+
+function isInInteractiveZone(clientX, clientY) {
+    var b = chatZoneBox();
+    return !!b && clientX >= b.x && clientX <= b.x + b.w &&
+           clientY >= b.y && clientY <= b.y + b.h;
+}
+
+// Tell Python the click-through exemption box for the chat zone.
+// Throttled; sends only when the box actually moved (pat-style).
+var chatLastBox = null;
+var chatLastBoxSent = 0;
+function reportChatZone(force) {
+    if (!bridge || typeof bridge.chatZone !== "function") return;
+    var b = chatZoneBox();
+    if (!b) return;
+    var box = {x: Math.round(b.x), y: Math.round(b.y),
+               w: Math.round(b.w), h: Math.round(b.h)};
+    var now = Date.now();
+    if (!force && now - chatLastBoxSent < 200) return;
+    var last = chatLastBox;
+    if (last && !force && Math.abs(last.x - box.x) < 3 &&
+        Math.abs(last.y - box.y) < 3 && Math.abs(last.w - box.w) < 3 &&
+        Math.abs(last.h - box.h) < 3) return;
+    chatLastBox = box;
+    chatLastBoxSent = now;
+    bridge.chatZone(box.x, box.y, box.w, box.h);
+}
+
+document.addEventListener("dblclick", function (e) {
+    if (e.button === 0 && isInInteractiveZone(e.clientX, e.clientY)) {
+        if (bridge && bridge.onDoubleClick) {
+            bridge.onDoubleClick();
+        }
+    }
+});
+
+document.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
+});
+</script>
+</body>
+</html>

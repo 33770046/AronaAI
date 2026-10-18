@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# Main program (pinned to the current working environment)
+PySide6==6.11.2
+PySide6-Fluent-Widgets==1.11.3
+qtwebview2==0.5.0  # Spine overlay WebView2 host (QtWebEngine replacement); pulls pythonnet/qtpy
+pyinstaller==6.22.3
+psutil==7.2.2  # used by regression test scripts (subprocess/VRAM probing)
+certifi==2026.7.22  # direct import in main.py (SSL_CERT_FILE), must not depend on the TTS section
+
+# TTS module runtime - shipped inside the TTS package (TTS/), never inside the main program.
+gsv-tts-lite==0.4.7
+torch==2.14.0+cu126  # CUDA 12.6 build, required for GPU acceleration. PyPI default Windows wheels are CPU-only. Do NOT use cu130.
+torchaudio==2.11.0+cu126  # gsv_tts inference dep (TTS.py/SV), matched to the torch build above, same cu126 index
+torchvision==0.29.0+cu126  # installed in this env, paired with the torch build above
